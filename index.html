@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0f14">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>RoundLcd GPS</title>
+<style>
+:root {
+	--bg: #0b0f14;
+	--panel: #151b23;
+	--text: #e8edf3;
+	--sub: #8b97a6;
+	--accent: #2bd4ff;
+	--ok: #35d07f;
+	--warn: #ffc83d;
+	--err: #ff6b5e;
+}
+@media (prefers-color-scheme: light) {
+	:root {
+		--bg: #f2f5f8;
+		--panel: #ffffff;
+		--text: #14202c;
+		--sub: #5c6b7c;
+		--accent: #0a86b8;
+		--ok: #12894d;
+		--warn: #a86f00;
+		--err: #c53a2e;
+	}
+}
+* { box-sizing: border-box; }
+body {
+	margin: 0;
+	padding: 16px;
+	background: var(--bg);
+	color: var(--text);
+	font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+	line-height: 1.5;
+}
+main { max-width: 460px; margin: 0 auto; }
+h1 { font-size: 18px; margin: 4px 0 16px; }
+.panel { background: var(--panel); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+.row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 3px 0; }
+.label { color: var(--sub); font-size: 13px; }
+.value { font-variant-numeric: tabular-nums; font-size: 17px; text-align: right; }
+.big { font-size: 22px; font-weight: 600; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.err { color: var(--err); }
+button {
+	width: 100%;
+	min-height: 52px;
+	border: 0;
+	border-radius: 12px;
+	font-size: 17px;
+	font-weight: 600;
+	background: var(--accent);
+	color: #04141c;
+}
+button.stop { background: var(--panel); color: var(--text); border: 1px solid var(--sub); }
+button:disabled { opacity: 0.5; }
+#log { font-size: 12px; color: var(--sub); white-space: pre-wrap; max-height: 9em; overflow: auto; }
+.note { font-size: 12px; color: var(--sub); }
+details.panel > summary { cursor: pointer; font-weight: 600; min-height: 32px; }
+#destMap { height: 260px; border-radius: 8px; margin: 8px 0; background: var(--bg); }
+input[type=text] {
+	width: 100%;
+	min-height: 44px;
+	padding: 0 12px;
+	border-radius: 10px;
+	border: 1px solid var(--sub);
+	background: var(--bg);
+	color: var(--text);
+	font-size: 16px;
+}
+button.sub { min-height: 44px; font-size: 15px; margin-top: 8px; background: var(--panel); color: var(--text); border: 1px solid var(--sub); }
+button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+	<h1>RoundLcd GPS</h1>
+
+	<div class="panel">
+		<div class="row"><span class="label">RoundLcd（BLE）</span><span class="value big" id="bleState">未接続</span></div>
+		<div class="row"><span class="label">GPS</span><span class="value big" id="gpsState">停止中</span></div>
+	</div>
+
+	<div class="panel">
+		<div class="row"><span class="label">緯度</span><span class="value" id="lat">-</span></div>
+		<div class="row"><span class="label">経度</span><span class="value" id="lon">-</span></div>
+		<div class="row"><span class="label">速度</span><span class="value" id="speed">-</span></div>
+		<div class="row"><span class="label">方位</span><span class="value" id="heading">-</span></div>
+		<div class="row"><span class="label">精度</span><span class="value" id="accuracy">-</span></div>
+		<div class="row"><span class="label">最後に送信</span><span class="value" id="sent">-</span></div>
+	</div>
+
+	<button id="toggle">RoundLcd に接続して送信を開始</button>
+	<p class="note">
+		先に RoundLcd の MAP 画面で DOWN を長押しして BLE を開始し、「WAITING」が出てから押してください。
+		走行中はこの画面を開いたままにします（画面は自動では消えません）。
+	</p>
+
+	<details class="panel" id="destPanel">
+		<summary>目的地を設定する</summary>
+		<div class="row"><span class="label">RoundLcd の目的地</span><span class="value" id="destCurrent">-</span></div>
+		<div id="destMap"></div>
+		<p class="note" id="destMapNote">地図をタップして選びます（地図の読み込みにはインターネットが必要です。地図は国土地理院の地図です）。</p>
+		<input type="text" id="destInput" placeholder="緯度,経度 または Google マップの URL" inputmode="text" autocomplete="off">
+		<button class="sub" id="destParse">入力から場所を選ぶ</button>
+		<div class="row"><span class="label">選んだ場所</span><span class="value" id="destCandidate">-</span></div>
+		<button class="primary" id="destSend">この場所を目的地にする</button>
+		<button class="sub" id="destHere">現在地を目的地にする</button>
+		<button class="sub" id="destClear">目的地を解除する</button>
+		<p class="note">Google マップの短縮リンク（maps.app.goo.gl）は読めません。リンクを開いて表示された長い URL、または場所を長押しして出る緯度経度をコピーして貼り付けてください。RoundLcd に接続していない間に選んだ場所は、接続したときに送ります。</p>
+	</details>
+
+	<div class="panel"><div id="log"></div></div>
+</main>
+
+<script>
+// RoundLcd/shared/include/gpsProtocol.h と同じ値・同じバイト配置にすること（手動で同期する）
+const GPS_SERVICE_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e001";
+const GPS_FIX_CHAR_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e002";
+const GPS_DEST_CHAR_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e003";
+const GPS_DEST_VERSION = 1;
+const GPS_DEST_FLAG_SET = 0x01;
+const GPS_FIX_VERSION = 1;
+const GPS_FLAG_VALID = 0x01;
+const GPS_FLAG_HEADING_VALID = 0x02;
+const GPS_HEADING_UNKNOWN = 0xFFFF;
+const GPS_ACCURACY_UNKNOWN = 0xFFFF;
+
+const SEND_INTERVAL_MS = 1000;			// 位置を送る間隔（RoundLcd は5秒途絶えると「古い」扱いにする）
+// ブラウザの watchPosition は位置が変わったときしか呼ばれない（停車中は数秒〜数十秒空くことがある）ので、最後の位置をこの間は送り続ける。
+// これを過ぎても更新が無ければ「測位できていない」を送る（RoundLcd は最後の位置を STALE で出す）
+const POSITION_MAX_AGE_MS = 30000;
+const RECONNECT_DELAY_MS = 3000;
+
+const $ = (id) => document.getElementById(id);
+
+let device = null;
+let characteristic = null;
+let destCharacteristic = null;
+let destCandidate = null;			// 選んでいる場所 {lat, lon}
+let destPending = undefined;		// 接続していない間に決めた送信内容（{lat, lon} / null=解除 / undefined=なし）
+let wantConnected = false;				// 利用者が接続を望んでいる間は、切れても再接続する
+let watchId = null;
+let lastPosition = null;				// {coords, receivedAt}
+let sendTimer = null;
+let sending = false;
+let wakeLock = null;
+
+function log(message) {
+	const time = new Date().toLocaleTimeString();
+	const box = $("log");
+	box.textContent = (time + " " + message + "\n" + box.textContent).split("\n").slice(0, 30).join("\n");
+}
+
+function setText(id, text, cls) {
+	const element = $(id);
+	element.textContent = text;
+	element.className = "value big" + (cls ? " " + cls : "");
+}
+
+function encodeFix(position) {
+	const view = new DataView(new ArrayBuffer(16));
+	let flags = 0;
+	let speed = 0;
+	let lat = 0;
+	let lon = 0;
+	let heading = GPS_HEADING_UNKNOWN;
+	let accuracy = GPS_ACCURACY_UNKNOWN;
+	if (position) {
+		const c = position.coords;
+		flags |= GPS_FLAG_VALID;
+		lat = Math.round(c.latitude * 1e7);
+		lon = Math.round(c.longitude * 1e7);
+		if (Number.isFinite(c.speed)) {
+			speed = Math.min(0xFFFF, Math.max(0, Math.round(c.speed * 3.6 * 10)));	// m/s → 0.1km/h
+		}
+		if (Number.isFinite(c.heading)) {
+			flags |= GPS_FLAG_HEADING_VALID;
+			heading = Math.round(((c.heading % 360) + 360) % 360 * 10) % 3600;
+		}
+		if (Number.isFinite(c.accuracy)) {
+			accuracy = Math.min(0xFFFE, Math.round(c.accuracy));
+		}
+	}
+	view.setUint8(0, GPS_FIX_VERSION);
+	view.setUint8(1, flags);
+	view.setUint16(2, speed, true);
+	view.setInt32(4, lat, true);
+	view.setInt32(8, lon, true);
+	view.setUint16(12, heading, true);
+	view.setUint16(14, accuracy, true);
+	return view.buffer;
+}
+
+function showPosition(position) {
+	const c = position.coords;
+	$("lat").textContent = c.latitude.toFixed(6);
+	$("lon").textContent = c.longitude.toFixed(6);
+	$("speed").textContent = Number.isFinite(c.speed) ? (c.speed * 3.6).toFixed(1) + " km/h" : "-";
+	$("heading").textContent = Number.isFinite(c.heading) ? Math.round(c.heading) + "°" : "-";
+	$("accuracy").textContent = Number.isFinite(c.accuracy) ? "±" + Math.round(c.accuracy) + " m" : "-";
+}
+
+function startGps() {
+	if (watchId !== null) {
+		return;
+	}
+	if (!navigator.geolocation) {
+		setText("gpsState", "非対応", "err");
+		return;
+	}
+	setText("gpsState", "測位待ち", "warn");
+	watchId = navigator.geolocation.watchPosition((position) => {
+		lastPosition = { coords: position.coords, receivedAt: Date.now() };
+		showPosition(position);
+		setText("gpsState", "測位中", "ok");
+	}, (error) => {
+		log("GPS エラー: " + error.message);
+		setText("gpsState", error.code === error.PERMISSION_DENIED ? "許可されていません" : "測位できません", "err");
+	}, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+}
+
+function stopGps() {
+	if (watchId !== null) {
+		navigator.geolocation.clearWatch(watchId);
+		watchId = null;
+	}
+	lastPosition = null;
+	setText("gpsState", "停止中");
+}
+
+async function acquireWakeLock() {
+	try {
+		if (("wakeLock" in navigator) && (wakeLock === null)) {
+			wakeLock = await navigator.wakeLock.request("screen");
+			wakeLock.addEventListener("release", () => { wakeLock = null; });
+		}
+	} catch (error) {
+		log("画面の常時点灯を取得できません: " + error.message);
+	}
+}
+
+document.addEventListener("visibilitychange", () => {
+	if (wantConnected && (document.visibilityState === "visible")) {
+		acquireWakeLock();				// 画面を切り替えると解除されるので取り直す
+	}
+});
+
+async function sendFix() {
+	if (!characteristic || sending) {
+		return;
+	}
+	const fresh = lastPosition && ((Date.now() - lastPosition.receivedAt) <= POSITION_MAX_AGE_MS);
+	sending = true;
+	try {
+		const data = encodeFix(fresh ? lastPosition : null);
+		if (characteristic.writeValueWithoutResponse) {
+			await characteristic.writeValueWithoutResponse(data);
+		} else {
+			await characteristic.writeValue(data);
+		}
+		$("sent").textContent = new Date().toLocaleTimeString();
+	} catch (error) {
+		log("送信に失敗: " + error.message);
+	} finally {
+		sending = false;
+	}
+}
+
+// ---- 目的地 ----
+function showDestCurrent(dest) {
+	$("destCurrent").textContent = dest ? dest.lat.toFixed(6) + ", " + dest.lon.toFixed(6) : "なし";
+}
+
+function encodeDest(dest) {
+	const view = new DataView(new ArrayBuffer(12));
+	view.setUint8(0, GPS_DEST_VERSION);
+	view.setUint8(1, dest ? GPS_DEST_FLAG_SET : 0);
+	view.setUint16(2, 0, true);
+	view.setInt32(4, dest ? Math.round(dest.lat * 1e7) : 0, true);
+	view.setInt32(8, dest ? Math.round(dest.lon * 1e7) : 0, true);
+	return view.buffer;
+}
+
+async function readDestination() {
+	const value = await destCharacteristic.readValue();
+	if ((value.byteLength === 12) && (value.getUint8(0) === GPS_DEST_VERSION)) {
+		const isSet = (value.getUint8(1) & GPS_DEST_FLAG_SET) !== 0;
+		showDestCurrent(isSet ? { lat: value.getInt32(4, true) / 1e7, lon: value.getInt32(8, true) / 1e7 } : null);
+	}
+}
+
+async function sendDestination(dest) {
+	if (!destCharacteristic) {
+		destPending = dest;				// 接続したときに送る
+		log("RoundLcd に接続していません。接続したときに目的地を送ります");
+		return;
+	}
+	try {
+		const data = encodeDest(dest);
+		if (destCharacteristic.writeValueWithResponse) {
+			await destCharacteristic.writeValueWithResponse(data);
+		} else {
+			await destCharacteristic.writeValue(data);
+		}
+		destPending = undefined;
+		showDestCurrent(dest);
+		log(dest ? "目的地を送りました: " + dest.lat.toFixed(6) + ", " + dest.lon.toFixed(6) : "目的地を解除しました");
+	} catch (error) {
+		log("目的地の送信に失敗: " + error.message);
+	}
+}
+
+// 座標、または Google マップなどの URL から緯度経度を取り出す
+function parseLocation(text) {
+	const patterns = [
+		/geo:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i,
+		/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/,
+		/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/,
+		/[?&](?:q|ll|query|center|destination)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i,
+		/(-?\d+\.\d+)\s*[,、\s]\s*(-?\d+\.\d+)/,
+	];
+	for (const pattern of patterns) {
+		const m = text.match(pattern);
+		if (m) {
+			const lat = Number(m[1]);
+			const lon = Number(m[2]);
+			if ((Math.abs(lat) <= 90) && (Math.abs(lon) <= 180)) {
+				return { lat, lon };
+			}
+		}
+	}
+	return null;
+}
+
+let destLeaflet = null;
+let destMarker = null;
+
+function setCandidate(location, moveMap) {
+	destCandidate = location;
+	$("destCandidate").textContent = location ? location.lat.toFixed(6) + ", " + location.lon.toFixed(6) : "-";
+	if (destLeaflet && location) {
+		if (destMarker) {
+			destMarker.setLatLng([location.lat, location.lon]);
+		} else {
+			destMarker = L.marker([location.lat, location.lon]).addTo(destLeaflet);
+		}
+		if (moveMap) {
+			destLeaflet.setView([location.lat, location.lon], Math.max(destLeaflet.getZoom(), 15));
+		}
+	}
+}
+
+// 目的地の欄を開いたときに、Leaflet（地図）を読み込んで表示する（オフラインなら地図なしで、貼り付けと現在地だけ使える）
+function loadLeaflet() {
+	return new Promise((resolve, reject) => {
+		if (window.L) {
+			resolve();
+			return;
+		}
+		const css = document.createElement("link");
+		css.rel = "stylesheet";
+		css.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+		document.head.appendChild(css);
+		const script = document.createElement("script");
+		script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+		script.onload = () => resolve();
+		script.onerror = () => reject(new Error("地図の部品を読み込めません"));
+		document.head.appendChild(script);
+	});
+}
+
+async function openDestMap() {
+	if (destLeaflet) {
+		setTimeout(() => destLeaflet.invalidateSize(), 100);
+		return;
+	}
+	try {
+		await loadLeaflet();
+	} catch (error) {
+		$("destMap").style.display = "none";
+		$("destMapNote").textContent = "地図を表示できません（オフライン）。座標か URL を貼り付けてください。";
+		return;
+	}
+	const start = lastPosition ? [lastPosition.coords.latitude, lastPosition.coords.longitude] : [35.68, 139.77];
+	destLeaflet = L.map("destMap").setView(start, 14);
+	L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png", {
+		maxZoom: 18,
+		attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html'>地理院タイル</a>",
+	}).addTo(destLeaflet);
+	destLeaflet.on("click", (event) => setCandidate({ lat: event.latlng.lat, lon: event.latlng.lng }, false));
+	if (destCandidate) {
+		setCandidate(destCandidate, true);
+	}
+}
+
+$("destPanel").addEventListener("toggle", () => {
+	if ($("destPanel").open) {
+		openDestMap();
+	}
+});
+$("destParse").addEventListener("click", () => {
+	const location = parseLocation($("destInput").value);
+	if (location) {
+		setCandidate(location, true);
+	} else {
+		log("座標を読み取れません。「35.6812,139.7671」の形か、Google マップの長い URL を貼ってください");
+	}
+});
+$("destSend").addEventListener("click", () => {
+	if (destCandidate) {
+		sendDestination(destCandidate);
+	} else {
+		log("先に場所を選んでください（地図をタップするか、座標・URL を貼り付けます）");
+	}
+});
+$("destHere").addEventListener("click", () => {
+	if (lastPosition) {
+		const here = { lat: lastPosition.coords.latitude, lon: lastPosition.coords.longitude };
+		setCandidate(here, true);
+		sendDestination(here);
+	} else {
+		log("現在地がまだ取れていません（RoundLcd に接続して測位できてから押してください）");
+	}
+});
+$("destClear").addEventListener("click", () => sendDestination(null));
+
+async function connectGatt() {
+	setText("bleState", "接続中", "warn");
+	const server = await device.gatt.connect();
+	const service = await server.getPrimaryService(GPS_SERVICE_UUID);
+	characteristic = await service.getCharacteristic(GPS_FIX_CHAR_UUID);
+	try {
+		destCharacteristic = await service.getCharacteristic(GPS_DEST_CHAR_UUID);
+		await readDestination();
+		if (destPending !== undefined) {
+			await sendDestination(destPending);
+		}
+	} catch (error) {
+		destCharacteristic = null;
+		log("目的地を使えません（RoundLcd のファームを更新してください）: " + error.message);
+	}
+	setText("bleState", "接続済み", "ok");
+	log("RoundLcd に接続しました");
+	if (sendTimer === null) {
+		sendTimer = setInterval(sendFix, SEND_INTERVAL_MS);
+	}
+	sendFix();
+}
+
+function onDisconnected() {
+	characteristic = null;
+	destCharacteristic = null;
+	log("RoundLcd との接続が切れました");
+	if (!wantConnected) {
+		setText("bleState", "未接続");
+		return;
+	}
+	setText("bleState", "再接続待ち", "warn");
+	setTimeout(reconnect, RECONNECT_DELAY_MS);
+}
+
+async function reconnect() {
+	if (!wantConnected || !device || device.gatt.connected) {
+		return;
+	}
+	try {
+		await connectGatt();
+	} catch (error) {
+		log("再接続に失敗: " + error.message);
+		setText("bleState", "再接続待ち", "warn");
+		setTimeout(reconnect, RECONNECT_DELAY_MS);
+	}
+}
+
+async function start() {
+	if (!navigator.bluetooth) {
+		setText("bleState", "非対応", "err");
+		log("このブラウザは Web Bluetooth に対応していません（Android の Chrome を使い、https で開いてください）");
+		return;
+	}
+	try {
+		device = await navigator.bluetooth.requestDevice({ filters: [{ services: [GPS_SERVICE_UUID] }] });
+	} catch (error) {
+		log("機器を選ばずに終了: " + error.message);
+		return;
+	}
+	wantConnected = true;
+	$("toggle").textContent = "送信を停止";
+	$("toggle").className = "stop";
+	device.addEventListener("gattserverdisconnected", onDisconnected);
+	startGps();
+	acquireWakeLock();
+	try {
+		await connectGatt();
+	} catch (error) {
+		log("接続に失敗: " + error.message);
+		setText("bleState", "再接続待ち", "warn");
+		setTimeout(reconnect, RECONNECT_DELAY_MS);
+	}
+}
+
+function stop() {
+	wantConnected = false;
+	if (sendTimer !== null) {
+		clearInterval(sendTimer);
+		sendTimer = null;
+	}
+	if (device && device.gatt.connected) {
+		device.gatt.disconnect();
+	}
+	stopGps();
+	if (wakeLock) {
+		wakeLock.release();
+	}
+	setText("bleState", "未接続");
+	$("toggle").textContent = "RoundLcd に接続して送信を開始";
+	$("toggle").className = "";
+}
+
+$("toggle").addEventListener("click", () => {
+	if (wantConnected) {
+		stop();
+	} else {
+		start();
+	}
+});
+
+if (!window.isSecureContext) {
+	log("https（または localhost）で開いていないため、位置情報と Bluetooth は使えません");
+}
+</script>
+</body>
+</html>
