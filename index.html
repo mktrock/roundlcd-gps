@@ -117,6 +117,14 @@ button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
 		<p class="note">Google マップの短縮リンク（maps.app.goo.gl）は読めません。リンクを開いて表示された長い URL、または場所を長押しして出る緯度経度をコピーして貼り付けてください。RoundLcd に接続していない間に選んだ場所は、接続したときに送ります。</p>
 	</details>
 
+	<details class="panel" id="gotoPanel">
+		<summary>GOTO（デバッグ：疑似移動）</summary>
+		<div class="row"><span class="label">状態</span><span class="value" id="gotoState">-</span></div>
+		<p class="note">目的地までの疑似移動をRoundLcd側で始めます（現在地は動かしません。RoundLcd自身のMAP画面の動作確認用）。目的地が設定されていて、RoundLcdが現在位置を受け取っている必要があります。</p>
+		<button class="primary" id="gotoStart">疑似移動を開始する</button>
+		<button class="sub" id="gotoStop">停止する</button>
+	</details>
+
 	<div class="panel"><div id="log"></div></div>
 </main>
 
@@ -125,8 +133,12 @@ button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
 const GPS_SERVICE_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e001";
 const GPS_FIX_CHAR_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e002";
 const GPS_DEST_CHAR_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e003";
+const GPS_GOTO_CHAR_UUID = "6f1d0a20-7c3e-4b52-9a1f-52a6b0c4e004";
 const GPS_DEST_VERSION = 1;
 const GPS_DEST_FLAG_SET = 0x01;
+const GPS_GOTO_VERSION = 1;
+const GPS_GOTO_CMD_STOP = 0;
+const GPS_GOTO_CMD_START = 1;
 const GPS_FIX_VERSION = 1;
 const GPS_FLAG_VALID = 0x01;
 const GPS_FLAG_HEADING_VALID = 0x02;
@@ -144,6 +156,7 @@ const $ = (id) => document.getElementById(id);
 let device = null;
 let characteristic = null;
 let destCharacteristic = null;
+let gotoCharacteristic = null;
 let destCandidate = null;			// 選んでいる場所 {lat, lon}
 let destPending = undefined;		// 接続していない間に決めた送信内容（{lat, lon} / null=解除 / undefined=なし）
 let wantConnected = false;				// 利用者が接続を望んでいる間は、切れても再接続する
@@ -432,6 +445,43 @@ $("destHere").addEventListener("click", () => {
 });
 $("destClear").addEventListener("click", () => sendDestination(null));
 
+// ---- GOTO（デバッグ：疑似移動） ----
+function encodeGoto(command) {
+	const view = new DataView(new ArrayBuffer(4));
+	view.setUint8(0, GPS_GOTO_VERSION);
+	view.setUint8(1, command);
+	view.setUint16(2, 0, true);
+	return view.buffer;
+}
+
+function showGotoState(running) {
+	$("gotoState").textContent = running ? "疑似移動中" : "停止中";
+}
+
+async function readGotoStatus() {
+	const value = await gotoCharacteristic.readValue();
+	if ((value.byteLength === 4) && (value.getUint8(0) === GPS_GOTO_VERSION)) {
+		showGotoState(value.getUint8(1) === GPS_GOTO_CMD_START);
+	}
+}
+
+async function sendGotoCommand(command) {
+	if (!gotoCharacteristic) {
+		log("RoundLcd に接続していません");
+		return;
+	}
+	try {
+		await gotoCharacteristic.writeValue(encodeGoto(command));
+		await readGotoStatus();
+		log(command === GPS_GOTO_CMD_START ? "GOTO を開始しました" : "GOTO を停止しました");
+	} catch (error) {
+		log("GOTO の送信に失敗: " + error.message);
+	}
+}
+
+$("gotoStart").addEventListener("click", () => sendGotoCommand(GPS_GOTO_CMD_START));
+$("gotoStop").addEventListener("click", () => sendGotoCommand(GPS_GOTO_CMD_STOP));
+
 async function connectGatt() {
 	setText("bleState", "接続中", "warn");
 	const server = await device.gatt.connect();
@@ -447,6 +497,14 @@ async function connectGatt() {
 		destCharacteristic = null;
 		log("目的地を使えません（RoundLcd のファームを更新してください）: " + error.message);
 	}
+	try {
+		gotoCharacteristic = await service.getCharacteristic(GPS_GOTO_CHAR_UUID);
+		await readGotoStatus();
+	} catch (error) {
+		gotoCharacteristic = null;
+		showGotoState(false);
+		log("GOTOを使えません（RoundLcd のファームを更新してください）: " + error.message);
+	}
 	setText("bleState", "接続済み", "ok");
 	log("RoundLcd に接続しました");
 	if (sendTimer === null) {
@@ -458,6 +516,8 @@ async function connectGatt() {
 function onDisconnected() {
 	characteristic = null;
 	destCharacteristic = null;
+	gotoCharacteristic = null;
+	showGotoState(false);
 	log("RoundLcd との接続が切れました");
 	if (!wantConnected) {
 		setText("bleState", "未接続");
