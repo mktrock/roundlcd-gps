@@ -92,7 +92,9 @@ button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
 		<div class="row"><span class="label">緯度</span><span class="value" id="lat">-</span></div>
 		<div class="row"><span class="label">経度</span><span class="value" id="lon">-</span></div>
 		<div class="row"><span class="label">速度</span><span class="value" id="speed">-</span></div>
-		<div class="row"><span class="label">方位</span><span class="value" id="heading">-</span></div>
+		<div class="row"><span class="label">方位（GPS）</span><span class="value" id="heading">-</span></div>
+		<div class="row"><span class="label">方位（コンパス）</span><span class="value" id="compass">-</span></div>
+		<div class="row"><span class="label">送る方位</span><span class="value" id="headingSent">-</span></div>
 		<div class="row"><span class="label">精度</span><span class="value" id="accuracy">-</span></div>
 		<div class="row"><span class="label">最後に送信</span><span class="value" id="sent">-</span></div>
 	</div>
@@ -102,6 +104,14 @@ button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
 		先に RoundLcd の MAP 画面で DOWN を長押しして BLE を開始し、「WAITING」が出てから押してください。
 		走行中はこの画面を開いたままにします（画面は自動では消えません）。
 	</p>
+	<div class="panel">
+		<label class="row"><span class="label">停止中・低速ではコンパスの方位を送る</span><input type="checkbox" id="useCompass" checked></label>
+		<p class="note">
+			時速 10km 以上では GPS の進行方向を、それより遅いときはスマホのコンパス（真北に補正）を送ります。
+			コンパスはスマホの画面の上側（立てているときは背面）が向いている方向です。スマホは進行方向に向けて固定してください。
+			車体の金属や磁石（マウント）で狂うことがあります。狂うときはチェックを外します（停止中は方位なしになります）。
+		</p>
+	</div>
 
 	<details class="panel" id="destPanel">
 		<summary>目的地を設定する</summary>
@@ -142,6 +152,7 @@ const GPS_GOTO_CMD_START = 1;
 const GPS_FIX_VERSION = 1;
 const GPS_FLAG_VALID = 0x01;
 const GPS_FLAG_HEADING_VALID = 0x02;
+const GPS_FLAG_HEADING_COMPASS = 0x04;
 const GPS_HEADING_UNKNOWN = 0xFFFF;
 const GPS_ACCURACY_UNKNOWN = 0xFFFF;
 
@@ -150,6 +161,9 @@ const SEND_INTERVAL_MS = 1000;			// 位置を送る間隔（RoundLcd は5秒途�
 // これを過ぎても更新が無ければ「測位できていない」を送る（RoundLcd は最後の位置を STALE で出す）
 const POSITION_MAX_AGE_MS = 30000;
 const RECONNECT_DELAY_MS = 3000;
+const HEADING_GPS_MIN_KMH = 10;			// これ以上の速さでは GPS の進行方向を送る（遅いと GPS の方位は定まらない）
+const COMPASS_MAX_AGE_MS = 2000;		// コンパスの値がこれより古ければ使わない
+const COMPASS_SMOOTH_MS = 400;			// コンパスのなまし（時定数）
 
 const $ = (id) => document.getElementById(id);
 
@@ -165,6 +179,10 @@ let lastPosition = null;				// {coords, receivedAt}
 let sendTimer = null;
 let sending = false;
 let wakeLock = null;
+let compass = null;						// {heading（真北基準・なまし後）, at}
+let compassE = 0;						// なまし用（方位の単位ベクトルの東・北成分）
+let compassN = 0;
+let compassAt = 0;
 
 function log(message) {
 	const time = new Date().toLocaleTimeString();
@@ -176,6 +194,21 @@ function setText(id, text, cls) {
 	const element = $(id);
 	element.textContent = text;
 	element.className = "value big" + (cls ? " " + cls : "");
+}
+
+// 送る方位を決める: 速ければ GPS の進行方向、遅ければコンパス。{deg, compass} か null
+function chooseHeading(position) {
+	if (position) {
+		const c = position.coords;
+		const kmh = Number.isFinite(c.speed) ? c.speed * 3.6 : 0;
+		if ((kmh >= HEADING_GPS_MIN_KMH) && Number.isFinite(c.heading)) {
+			return { deg: c.heading, compass: false };
+		}
+	}
+	if ($("useCompass").checked && compass && ((Date.now() - compass.at) <= COMPASS_MAX_AGE_MS)) {
+		return { deg: compass.heading, compass: true };
+	}
+	return null;
 }
 
 function encodeFix(position) {
@@ -194,9 +227,13 @@ function encodeFix(position) {
 		if (Number.isFinite(c.speed)) {
 			speed = Math.min(0xFFFF, Math.max(0, Math.round(c.speed * 3.6 * 10)));	// m/s → 0.1km/h
 		}
-		if (Number.isFinite(c.heading)) {
-			flags |= GPS_FLAG_HEADING_VALID;
-			heading = Math.round(((c.heading % 360) + 360) % 360 * 10) % 3600;
+		const chosen = chooseHeading(position);
+		if (chosen) {
+			flags |= GPS_FLAG_HEADING_VALID | (chosen.compass ? GPS_FLAG_HEADING_COMPASS : 0);
+			heading = Math.round(((chosen.deg % 360) + 360) % 360 * 10) % 3600;
+			$("headingSent").textContent = Math.round(heading / 10) + "°（" + (chosen.compass ? "コンパス" : "GPS") + "）";
+		} else {
+			$("headingSent").textContent = "-";
 		}
 		if (Number.isFinite(c.accuracy)) {
 			accuracy = Math.min(0xFFFE, Math.round(c.accuracy));
@@ -219,6 +256,77 @@ function showPosition(position) {
 	$("speed").textContent = Number.isFinite(c.speed) ? (c.speed * 3.6).toFixed(1) + " km/h" : "-";
 	$("heading").textContent = Number.isFinite(c.heading) ? Math.round(c.heading) + "°" : "-";
 	$("accuracy").textContent = Number.isFinite(c.accuracy) ? "±" + Math.round(c.accuracy) + " m" : "-";
+}
+
+// ---- コンパス ----
+// 偏角（磁北が真北から西へ何度ずれているか）。国土地理院の2020.0年値の近似式（1次の項まで）。日本の外では0
+function declinationWestDeg(lat, lon) {
+	if ((lat < 20) || (lat > 46) || (lon < 122) || (lon > 154)) {
+		return 0;
+	}
+	const dLat = lat - 37;
+	const dLon = lon - 138;
+	return (460.585 + 18.662 * dLat - 6.422 * dLon) / 60;
+}
+
+// 端末の向き（deviceorientationabsolute の alpha/beta/gamma。磁北基準）から、スマホが向いている方位を求める。
+// 画面の上側（画面の回転を考慮）と背面の水平成分を足した向きにするので、寝かせても立てても（その間の傾きでも）使える
+function deviceHeading(alpha, beta, gamma) {
+	const d = Math.PI / 180;
+	const cA = Math.cos(alpha * d), sA = Math.sin(alpha * d);
+	const cB = Math.cos(beta * d), sB = Math.sin(beta * d);
+	const cG = Math.cos(gamma * d), sG = Math.sin(gamma * d);
+	const yE = -sA * cB, yN = cA * cB;							// 端末の上辺の向き（東・北成分）
+	const xE = cA * cG - sA * sB * sG, xN = sA * cG + cA * sB * sG;	// 端末の右辺の向き
+	const bE = -(cA * sG + sA * sB * cG), bN = -(sA * sG - cA * sB * cG);	// 背面の向き
+	const angle = ((screen.orientation && Number.isFinite(screen.orientation.angle)) ? screen.orientation.angle : 0) * d;
+	const uE = Math.cos(angle) * yE + Math.sin(angle) * xE;		// 画面の上側
+	const uN = Math.cos(angle) * yN + Math.sin(angle) * xN;
+	const hE = uE + bE, hN = uN + bN;
+	if (Math.hypot(hE, hN) < 0.2) {
+		return null;
+	}
+	return (Math.atan2(hE, hN) / d + 360) % 360;
+}
+
+function onOrientation(event) {
+	if (!event.absolute || (event.alpha === null) || (event.beta === null) || (event.gamma === null)) {
+		return;
+	}
+	const magnetic = deviceHeading(event.alpha, event.beta, event.gamma);
+	if (magnetic === null) {
+		return;
+	}
+	let heading = magnetic;
+	if (lastPosition) {
+		heading -= declinationWestDeg(lastPosition.coords.latitude, lastPosition.coords.longitude);
+	}
+	// 単位ベクトルでなます（359°と1°の間で平均が180°にならないように）
+	const now = Date.now();
+	const k = compassAt ? (1 - Math.exp(-(now - compassAt) / COMPASS_SMOOTH_MS)) : 1;
+	compassAt = now;
+	const r = heading * Math.PI / 180;
+	compassE += (Math.sin(r) - compassE) * k;
+	compassN += (Math.cos(r) - compassN) * k;
+	const smoothed = (Math.atan2(compassE, compassN) * 180 / Math.PI + 360) % 360;
+	compass = { heading: smoothed, at: now };
+}
+
+let compassStarted = false;
+function startCompass() {
+	if (compassStarted) {
+		return;
+	}
+	if (!("ondeviceorientationabsolute" in window)) {
+		$("compass").textContent = "非対応";
+		return;
+	}
+	compassStarted = true;
+	window.addEventListener("deviceorientationabsolute", onOrientation);
+	setInterval(() => {
+		const fresh = compass && ((Date.now() - compass.at) <= COMPASS_MAX_AGE_MS);
+		$("compass").textContent = fresh ? Math.round(compass.heading) + "°" : "-";
+	}, 500);
 }
 
 function startGps() {
@@ -557,6 +665,7 @@ async function start() {
 	$("toggle").className = "stop";
 	device.addEventListener("gattserverdisconnected", onDisconnected);
 	startGps();
+	startCompass();
 	acquireWakeLock();
 	try {
 		await connectGatt();
@@ -592,6 +701,9 @@ $("toggle").addEventListener("click", () => {
 		start();
 	}
 });
+
+$("useCompass").checked = localStorage.getItem("useCompass") !== "0";
+$("useCompass").addEventListener("change", () => localStorage.setItem("useCompass", $("useCompass").checked ? "1" : "0"));
 
 if (!window.isSecureContext) {
 	log("https（または localhost）で開いていないため、位置情報と Bluetooth は使えません");
