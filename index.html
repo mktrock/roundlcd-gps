@@ -77,6 +77,43 @@ input[type=text] {
 }
 button.sub { min-height: 44px; font-size: 15px; margin-top: 8px; background: var(--panel); color: var(--text); border: 1px solid var(--sub); }
 button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
+select {
+	min-height: 40px;
+	border-radius: 10px;
+	border: 1px solid var(--sub);
+	background: var(--bg);
+	color: var(--text);
+	font-size: 15px;
+	padding: 0 8px;
+}
+#joyPad {
+	position: relative;
+	width: 220px;
+	height: 220px;
+	margin: 12px auto;
+	border-radius: 50%;
+	background: radial-gradient(circle, var(--bg) 0%, var(--bg) 60%, var(--panel) 100%);
+	border: 2px solid var(--sub);
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+#joyPad.disabled { opacity: 0.4; }
+#joyPad .tick { position: absolute; color: var(--sub); font-size: 12px; transform: translate(-50%, -50%); pointer-events: none; }
+#joyKnob {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 72px;
+	height: 72px;
+	margin: -36px 0 0 -36px;
+	border-radius: 50%;
+	background: var(--accent);
+	opacity: 0.9;
+	pointer-events: none;
+}
+.btnrow { display: flex; gap: 8px; }
+.btnrow button { flex: 1; }
 </style>
 </head>
 <body>
@@ -133,6 +170,46 @@ button.primary { min-height: 48px; font-size: 16px; margin-top: 8px; }
 		<p class="note">目的地までの疑似移動をRoundLcd側で始めます（現在地は動かしません。RoundLcd自身のMAP画面の動作確認用）。目的地が設定されていて、RoundLcdが現在位置を受け取っている必要があります。</p>
 		<button class="primary" id="gotoStart">疑似移動を開始する</button>
 		<button class="sub" id="gotoStop">停止する</button>
+	</details>
+
+	<details class="panel" id="joyPanel">
+		<summary>デバッグ：現在地を動かす</summary>
+		<label class="row"><span class="label">GPS の代わりに、ここで動かす位置を送る</span><input type="checkbox" id="joyEnable"></label>
+		<div class="row"><span class="label">送る位置</span><span class="value" id="joyPos">-</span></div>
+		<div class="row"><span class="label">速度・方位</span><span class="value" id="joyMotion">-</span></div>
+		<div id="joyPad" class="disabled">
+			<span class="tick" style="left:50%;top:9%">北</span>
+			<span class="tick" style="left:91%;top:50%">東</span>
+			<span class="tick" style="left:50%;top:91%">南</span>
+			<span class="tick" style="left:9%;top:50%">西</span>
+			<div id="joyKnob"></div>
+		</div>
+		<div class="row">
+			<span class="label">操作</span>
+			<select id="joyMode">
+				<option value="north">北が上（倒した方角へ進む）</option>
+				<option value="drive">進行方向が上（上下で加減速・左右で曲がる）</option>
+			</select>
+		</div>
+		<div class="row">
+			<span class="label">いっぱいに倒したときの速さ</span>
+			<select id="joyMaxKmh">
+				<option value="10">10 km/h</option>
+				<option value="30">30 km/h</option>
+				<option value="60" selected>60 km/h</option>
+				<option value="120">120 km/h</option>
+				<option value="300">300 km/h</option>
+			</select>
+		</div>
+		<div class="btnrow">
+			<button class="sub" id="joyToGps">GPS の現在地へ</button>
+			<button class="sub" id="joyToCandidate">目的地の欄で選んだ場所へ</button>
+		</div>
+		<p class="note">
+			チェックを入れている間は、本物の GPS の代わりにこの位置を RoundLcd へ送ります（スマホを持ち歩かずに MAP 画面の地図・軌跡・目的地の表示を確かめるため）。
+			円の中のつまみを指で倒すと、倒した量に応じた速さで動きます（離すと止まります）。PC のブラウザではキーボードの矢印キーでも動かせます（Shift で 4 倍速）。
+			始めの位置は GPS の現在地（無ければ前回の位置か東京駅）です。「目的地の欄で選んだ場所へ」は、目的地の地図でタップした場所・貼り付けた座標へ飛びます（RoundLcd は大きく飛んだところで軌跡を切ります）。
+		</p>
 	</details>
 
 	<div class="panel"><div id="log"></div></div>
@@ -198,6 +275,9 @@ function setText(id, text, cls) {
 
 // 送る方位を決める: 速ければ GPS の進行方向、遅ければコンパス。{deg, compass} か null
 function chooseHeading(position) {
+	if (position && position.debug) {					// デバッグで動かしている位置は、動かした向きをそのまま送る
+		return Number.isFinite(position.coords.heading) ? { deg: position.coords.heading, compass: false } : null;
+	}
 	if (position) {
 		const c = position.coords;
 		const kmh = Number.isFinite(c.speed) ? c.speed * 3.6 : 0;
@@ -381,7 +461,7 @@ async function sendFix() {
 	const fresh = lastPosition && ((Date.now() - lastPosition.receivedAt) <= POSITION_MAX_AGE_MS);
 	sending = true;
 	try {
-		const data = encodeFix(fresh ? lastPosition : null);
+		const data = joyActive() ? encodeFix(joyPosition()) : encodeFix(fresh ? lastPosition : null);
 		if (characteristic.writeValueWithoutResponse) {
 			await characteristic.writeValueWithoutResponse(data);
 		} else {
@@ -543,7 +623,11 @@ $("destSend").addEventListener("click", () => {
 	}
 });
 $("destHere").addEventListener("click", () => {
-	if (lastPosition) {
+	if (joyActive()) {									// デバッグで動かしている間はその位置
+		const here = { lat: joy.lat, lon: joy.lon };
+		setCandidate(here, true);
+		sendDestination(here);
+	} else if (lastPosition) {
 		const here = { lat: lastPosition.coords.latitude, lon: lastPosition.coords.longitude };
 		setCandidate(here, true);
 		sendDestination(here);
@@ -589,6 +673,252 @@ async function sendGotoCommand(command) {
 
 $("gotoStart").addEventListener("click", () => sendGotoCommand(GPS_GOTO_CMD_START));
 $("gotoStop").addEventListener("click", () => sendGotoCommand(GPS_GOTO_CMD_STOP));
+
+// ---- デバッグ：現在地を動かす（ジョイスティック・矢印キー） ----
+// 本物の GPS の代わりに、ここで動かす位置（joy）を送る。RoundLcd 側は普通の GpsFix として受け取るので、ファームの変更は要らない
+const JOY_TICK_MS = 100;				// 位置を進める間隔
+const JOY_SEND_MS = 500;				// 動いている間に送る間隔（止まっている間は SEND_INTERVAL_MS ごと）
+const JOY_DEAD_ZONE = 0.08;				// つまみをこれより倒していなければ止まっている扱い
+const JOY_TURN_DEG_PER_S = 90;			// 「進行方向が上」でいっぱいに左右へ倒したときの曲がる速さ
+const JOY_KEY_BOOST = 4;				// Shift を押しながら矢印キーを押したときの倍率
+const JOY_ACCURACY_M = 3;				// 送る精度
+const JOY_DEFAULT = { lat: 35.6812, lon: 139.7671 };	// 始めの位置が無いとき（東京駅）
+const M_PER_DEG = 111319.490793;
+
+let joy = null;							// {lat, lon, heading（度。まだ動かしていなければ null）, speedKmh}
+let joyStick = { x: 0, y: 0 };			// つまみの倒し具合（右・上が正、-1〜1）
+let joyPointer = null;
+const joyKeys = new Set();
+let joyShift = false;
+let joyLastTick = performance.now();
+let joyLastSend = 0;
+let joyMapMarker = null;
+
+function joyActive() {
+	return $("joyEnable").checked && (joy !== null);
+}
+
+function joyPosition() {
+	return {
+		debug: true,
+		coords: {
+			latitude: joy.lat,
+			longitude: joy.lon,
+			speed: joy.speedKmh / 3.6,
+			heading: (joy.heading === null) ? NaN : joy.heading,
+			accuracy: JOY_ACCURACY_M,
+		},
+	};
+}
+
+function joyShow() {
+	$("joyPos").textContent = joy ? joy.lat.toFixed(6) + ", " + joy.lon.toFixed(6) : "-";
+	$("joyMotion").textContent = joy ? joy.speedKmh.toFixed(0) + " km/h・" + ((joy.heading === null) ? "-" : Math.round(joy.heading) + "°") : "-";
+	if (destLeaflet && joyActive()) {					// 目的地の地図にも出す
+		if (joyMapMarker) {
+			joyMapMarker.setLatLng([joy.lat, joy.lon]);
+		} else {
+			joyMapMarker = L.circleMarker([joy.lat, joy.lon], { radius: 7, color: "#0a86b8", fillOpacity: 0.8 }).addTo(destLeaflet);
+		}
+	} else if (joyMapMarker) {
+		joyMapMarker.remove();
+		joyMapMarker = null;
+	}
+}
+
+function joyJumpTo(location, what) {
+	if (!joy) {
+		joy = { lat: location.lat, lon: location.lon, heading: null, speedKmh: 0 };
+	}
+	joy.lat = location.lat;
+	joy.lon = location.lon;
+	joy.speedKmh = 0;
+	joySave();
+	joyShow();
+	log("デバッグの位置を" + what + "へ移しました: " + location.lat.toFixed(6) + ", " + location.lon.toFixed(6));
+	if (joyActive()) {
+		sendFix();
+	}
+}
+
+function joySave() {
+	if (joy) {
+		localStorage.setItem("joyPos", JSON.stringify({ lat: joy.lat, lon: joy.lon, heading: joy.heading }));
+	}
+}
+
+// 始めの位置: GPS の現在地 → 前回の位置 → 東京駅
+function joyStartPosition() {
+	if (lastPosition) {
+		return { lat: lastPosition.coords.latitude, lon: lastPosition.coords.longitude, heading: null };
+	}
+	try {
+		const saved = JSON.parse(localStorage.getItem("joyPos"));
+		if (saved && Number.isFinite(saved.lat) && Number.isFinite(saved.lon)) {
+			return { lat: saved.lat, lon: saved.lon, heading: Number.isFinite(saved.heading) ? saved.heading : null };
+		}
+	} catch (error) {
+		// 保存した値が壊れていれば使わない
+	}
+	return { lat: JOY_DEFAULT.lat, lon: JOY_DEFAULT.lon, heading: null };
+}
+
+// つまみと矢印キーの倒し具合（右・上が正）。boost は速さの倍率
+function joyInput() {
+	let x = joyStick.x;
+	let y = joyStick.y;
+	let boost = 1;
+	if (joyKeys.size > 0) {
+		let kx = (joyKeys.has("ArrowRight") ? 1 : 0) - (joyKeys.has("ArrowLeft") ? 1 : 0);
+		let ky = (joyKeys.has("ArrowUp") ? 1 : 0) - (joyKeys.has("ArrowDown") ? 1 : 0);
+		const len = Math.hypot(kx, ky);
+		if (len > 0) {
+			x = kx / len;
+			y = ky / len;
+			boost = joyShift ? JOY_KEY_BOOST : 1;
+		}
+	}
+	return { x, y, boost };
+}
+
+function joyTick() {
+	const now = performance.now();
+	const dt = Math.min(0.5, (now - joyLastTick) / 1000);
+	joyLastTick = now;
+	if (!joyActive()) {
+		return;
+	}
+	const input = joyInput();
+	const maxKmh = Number($("joyMaxKmh").value) * input.boost;
+	const before = { lat: joy.lat, lon: joy.lon, heading: joy.heading, speedKmh: joy.speedKmh };
+	if ($("joyMode").value === "drive") {
+		// 上に倒した量が速さ（下は止まる）、左右に倒した量が曲がる速さ。止まっていても向きは変えられる
+		joy.speedKmh = (input.y > JOY_DEAD_ZONE) ? input.y * maxKmh : 0;
+		if (Math.abs(input.x) > JOY_DEAD_ZONE) {
+			joy.heading = ((joy.heading === null ? 0 : joy.heading) + input.x * JOY_TURN_DEG_PER_S * dt + 360) % 360;
+		}
+	} else {
+		// 倒した方角へ、倒した量に応じた速さで進む（画面の上が北）
+		const amount = Math.min(1, Math.hypot(input.x, input.y));
+		if (amount > JOY_DEAD_ZONE) {
+			joy.heading = (Math.atan2(input.x, input.y) * 180 / Math.PI + 360) % 360;
+			joy.speedKmh = amount * maxKmh;
+		} else {
+			joy.speedKmh = 0;
+		}
+	}
+	if ((joy.speedKmh > 0) && (joy.heading !== null)) {
+		const meters = joy.speedKmh / 3.6 * dt;
+		const rad = joy.heading * Math.PI / 180;
+		joy.lat += meters * Math.cos(rad) / M_PER_DEG;
+		joy.lon += meters * Math.sin(rad) / (M_PER_DEG * Math.cos(joy.lat * Math.PI / 180));
+	}
+	const changed = (joy.lat !== before.lat) || (joy.lon !== before.lon) || (joy.heading !== before.heading) || (joy.speedKmh !== before.speedKmh);
+	if (changed) {
+		joyShow();
+		if ((now - joyLastSend) >= JOY_SEND_MS) {
+			joyLastSend = now;
+			joySave();
+			sendFix();
+		}
+	}
+}
+
+function joyMovePointer(event) {
+	const pad = $("joyPad");
+	const rect = pad.getBoundingClientRect();
+	const travel = rect.width / 2 - 36;				// つまみの中心が動ける半径
+	let dx = event.clientX - (rect.left + rect.width / 2);
+	let dy = event.clientY - (rect.top + rect.height / 2);
+	const len = Math.hypot(dx, dy);
+	if (len > travel) {
+		dx *= travel / len;
+		dy *= travel / len;
+	}
+	$("joyKnob").style.transform = "translate(" + dx + "px, " + dy + "px)";
+	joyStick = { x: dx / travel, y: -dy / travel };
+}
+
+function joyRelease() {
+	joyPointer = null;
+	joyStick = { x: 0, y: 0 };
+	$("joyKnob").style.transform = "";
+}
+
+$("joyPad").addEventListener("pointerdown", (event) => {
+	if (!joyActive()) {
+		return;
+	}
+	joyPointer = event.pointerId;
+	$("joyPad").setPointerCapture(event.pointerId);
+	joyMovePointer(event);
+});
+$("joyPad").addEventListener("pointermove", (event) => {
+	if (event.pointerId === joyPointer) {
+		joyMovePointer(event);
+	}
+});
+$("joyPad").addEventListener("pointerup", joyRelease);
+$("joyPad").addEventListener("pointercancel", joyRelease);
+
+window.addEventListener("keydown", (event) => {
+	joyShift = event.shiftKey;
+	const tag = event.target.tagName;
+	if (!joyActive() || !event.key.startsWith("Arrow") || (tag === "INPUT") || (tag === "SELECT")) {
+		return;
+	}
+	joyKeys.add(event.key);
+	event.preventDefault();							// ページがスクロールしないように
+});
+window.addEventListener("keyup", (event) => {
+	joyShift = event.shiftKey;
+	joyKeys.delete(event.key);
+});
+window.addEventListener("blur", () => joyKeys.clear());
+
+$("joyEnable").addEventListener("change", () => {
+	if ($("joyEnable").checked) {
+		if (!joy) {
+			const start = joyStartPosition();
+			joy = { lat: start.lat, lon: start.lon, heading: start.heading, speedKmh: 0 };
+		}
+		$("joyPad").classList.remove("disabled");
+		log("デバッグ: GPS の代わりに動かす位置を送ります");
+		sendFix();
+	} else {
+		joyRelease();
+		joyKeys.clear();
+		if (joy) {
+			joy.speedKmh = 0;
+		}
+		$("joyPad").classList.add("disabled");
+		log("デバッグ: GPS の位置を送る状態に戻しました");
+	}
+	joyShow();
+});
+$("joyToGps").addEventListener("click", () => {
+	if (lastPosition) {
+		joyJumpTo({ lat: lastPosition.coords.latitude, lon: lastPosition.coords.longitude }, "GPS の現在地");
+	} else {
+		log("GPS の現在地がまだ取れていません");
+	}
+});
+$("joyToCandidate").addEventListener("click", () => {
+	if (destCandidate) {
+		joyJumpTo(destCandidate, "選んだ場所");
+	} else {
+		log("先に「目的地を設定する」の欄で場所を選んでください（地図をタップするか、座標・URL を貼り付けます）");
+	}
+});
+$("joyMode").addEventListener("change", () => localStorage.setItem("joyMode", $("joyMode").value));
+$("joyMaxKmh").addEventListener("change", () => localStorage.setItem("joyMaxKmh", $("joyMaxKmh").value));
+if (localStorage.getItem("joyMode")) {
+	$("joyMode").value = localStorage.getItem("joyMode");
+}
+if (localStorage.getItem("joyMaxKmh")) {
+	$("joyMaxKmh").value = localStorage.getItem("joyMaxKmh");
+}
+setInterval(joyTick, JOY_TICK_MS);
 
 async function connectGatt() {
 	setText("bleState", "接続中", "warn");
